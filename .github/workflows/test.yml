@@ -1,0 +1,141 @@
+name: Test
+
+on:
+  push:
+    branches: # on all branches except `typos`
+      - '**'
+      - '!typos'
+    paths-ignore:
+      - 'docs/**'
+      - 'scripts/**'
+      - 'data/**'
+      - '.git*'
+      - 'README.md'
+  pull_request:
+    branches:
+      - '**'
+  schedule: # Every Monday at 04:00 UTC
+    - cron: '0 4 * * 1'
+
+jobs:
+  caching:
+    strategy:
+      matrix:
+        python-version: [ "3.10", "3.11", "3.12" ]
+        os: [ ubuntu-latest ]
+      fail-fast: false
+
+    defaults:
+      run:
+        shell: bash -elo pipefail {0}
+
+    name: Cache for ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get week number
+        run: echo "WEEK=$(date +'%V')" >> $GITHUB_ENV
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: mamba-org/setup-micromamba@v1
+        with:
+          create-args: python=${{ matrix.python-version }}
+          environment-file: environment-dev.yml
+          cache-environment: true
+          cache-environment-key: W${{ env.WEEK }}
+
+  run-tests:
+    needs: caching
+    strategy:
+      matrix:
+        python-version: [ "3.10", "3.11", "3.12" ]
+        os: [ ubuntu-latest ]
+        submodule:
+          - {
+            name: "Metrics & Graph Stats",
+            pytest_args: "tests/metrics/ tests/test_graph_stats.py" }
+          - { name: "Approaches", pytest_args: "tests/partitioning/approaches/" }
+          - { name: "Partitioning Base", pytest_args: "tests/partitioning/test_base.py" }
+          - {
+            name: "Partitioning Rest",
+            pytest_args: "tests/partitioning/ --ignore=tests/partitioning/approaches/ --ignore=tests/partitioning/test_base.py"
+          }
+          - { name: "Population", pytest_args: "tests/population/" }
+          - { name: "Attribute", pytest_args: "tests/test_attribute.py" }
+          - { name: "Plot", pytest_args: "tests/test_plot.py" }
+          - { name: "Utils", pytest_args: "tests/test_utils.py" }
+      fail-fast: false
+
+    name: ${{ matrix.submodule.name }} (${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get week number
+        run: echo "WEEK=$(date +'%V')" >> $GITHUB_ENV
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: mamba-org/setup-micromamba@v1
+        with:
+          create-args: python=${{ matrix.python-version }}
+          environment-file: environment-dev.yml
+          cache-environment: true
+          cache-environment-key: W${{ env.WEEK }}
+
+      - name: Install superblockify
+        run: pip install --no-build-isolation --no-deps -e .
+
+      - name: "Run tests ${{ matrix.submodule.name }}"
+        if: matrix.python-version != '3.12' || matrix.os != 'ubuntu-latest'
+        run: |
+          pytest ${{ matrix.submodule.pytest_args }}
+
+      - name: "Run tests ${{ matrix.submodule.name }} with coverage"
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        run: |
+          pytest --cov=superblockify ${{ matrix.submodule.pytest_args }}
+        env:
+          COVERAGE_FILE: ".coverage.${{ matrix.submodule.name }}"
+
+      - name: Store coverage file
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.submodule.name }}
+          path: ".coverage.${{ matrix.submodule.name }}"
+
+  coverage:
+    name: Merge Coverage
+    needs: run-tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load coverages
+        uses: actions/download-artifact@v4
+        id: download
+        with:
+          path: coverage
+          pattern: 'coverage-*'
+          merge-multiple: true
+
+      - name: Install coverage
+        run: pip install coverage
+
+      - name: Merge coverage files
+        run: coverage combine coverage/
+
+      - name: Upload coverage report to Codecov
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
